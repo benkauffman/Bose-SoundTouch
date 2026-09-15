@@ -100,4 +100,50 @@ func TestAddSource_MultipleSpotifyAccountsCoexist(t *testing.T) {
 	if got[userB] != "bs-bbbb" {
 		t.Errorf("re-adding account A must not touch account B; secret = %q, want %q", got[userB], "bs-bbbb")
 	}
+
+	// A datastore written by an older build can hold duplicate entries for
+	// the same account. Re-adding that account must collapse them to one.
+	sources, gerr := ds.GetConfiguredSources(account, device)
+	if gerr != nil {
+		t.Fatalf("get sources: %v", gerr)
+	}
+
+	for _, s := range sources {
+		if s.SourceKey.Account == userB {
+			dup := s
+			dup.ID = "SRC_legacy_duplicate"
+			sources = append(sources, dup)
+
+			break
+		}
+	}
+
+	if serr := ds.SaveConfiguredSources(account, device, sources); serr != nil {
+		t.Fatalf("seed duplicate: %v", serr)
+	}
+
+	if _, err := AddSource(ds, account, userB, sp, "bs-bbbb-2", constants.CredentialTypeTokenV3, "Account B"); err != nil {
+		t.Fatalf("re-add account B: %v", err)
+	}
+
+	sources, gerr = ds.GetConfiguredSources(account, device)
+	if gerr != nil {
+		t.Fatalf("get sources: %v", gerr)
+	}
+
+	countB := 0
+
+	for _, s := range sources {
+		if s.SourceKey.Type == constants.ProviderSpotify && s.SourceKey.Account == userB {
+			countB++
+		}
+	}
+
+	if countB != 1 {
+		t.Errorf("re-adding account B should collapse legacy duplicates to one entry; got %d", countB)
+	}
+
+	if got = spotifyAccounts(); len(got) != 2 || got[userA] != "bs-aaaa-2" || got[userB] != "bs-bbbb-2" {
+		t.Errorf("after dedup expected both accounts with updated secrets; got %+v", got)
+	}
 }

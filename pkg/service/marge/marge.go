@@ -2578,11 +2578,11 @@ func AddSource(ds *datastore.DataStore, account, username, providerID, secret, s
 			perAccount := providerID == strconv.Itoa(constants.StoredMusicProviderID) ||
 				providerID == strconv.Itoa(constants.SpotifyProviderID)
 
-			for i := range sources {
-				sameProvider := sources[i].SourceProviderID == providerID
+			matches := func(s models.ConfiguredSource) bool {
+				sameProvider := s.SourceProviderID == providerID
 				// Legacy Spotify entries may carry the type without the
 				// provider id; treat them as the same provider.
-				if providerID == strconv.Itoa(constants.SpotifyProviderID) && sources[i].SourceKey.Type == constants.ProviderSpotify {
+				if providerID == strconv.Itoa(constants.SpotifyProviderID) && s.SourceKey.Type == constants.ProviderSpotify {
 					sameProvider = true
 				}
 
@@ -2590,17 +2590,36 @@ func AddSource(ds *datastore.DataStore, account, username, providerID, secret, s
 					// Match on the persisted account identity
 					// (SourceKey.Account), not Username, which does not
 					// round-trip through the datastore.
-					sameProvider = sameProvider && sources[i].SourceKey.Account == username
+					sameProvider = sameProvider && s.SourceKey.Account == username
 				}
 
-				if sameProvider {
-					sources[i] = newSrc
+				return sameProvider
+			}
 
-					return sources, nil
+			// Replace the first match in place and drop any further matches:
+			// older builds could leave duplicate entries for the same
+			// account behind (e.g. a re-link before this dedup existed),
+			// and those would otherwise survive forever.
+			out := sources[:0:0]
+			replaced := false
+
+			for _, s := range sources {
+				if !matches(s) {
+					out = append(out, s)
+					continue
+				}
+
+				if !replaced {
+					out = append(out, newSrc)
+					replaced = true
 				}
 			}
 
-			return append(sources, newSrc), nil
+			if !replaced {
+				out = append(out, newSrc)
+			}
+
+			return out, nil
 		})
 		if err != nil {
 			log.Printf("[Marge] AddSource: failed to save source %s for device %s: %s", sanitizeLog(newSrc.SourceKey.Type), sanitizeLog(devID), sanitizeErr(err))
