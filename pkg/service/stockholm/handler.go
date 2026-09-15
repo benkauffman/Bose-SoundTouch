@@ -104,15 +104,25 @@ func (h *Handler) Mount(r chi.Router) {
 	r.HandleFunc(apiBase+"/api/http-proxy", h.handleProxy)
 
 	if h.cfg.BasePath != "" {
-		// Redirect bare /stockholm to /stockholm/ so the browser sets the correct
-		// base URL for relative asset references.
-		r.Get(h.cfg.BasePath, func(w http.ResponseWriter, r *http.Request) {
-			http.Redirect(w, r, h.cfg.BasePath+"/", http.StatusMovedPermanently)
-		})
 		// Strip the base path prefix before passing to handleStatic so that
 		// resolveStaticFile sees paths like "/" or "/index.html", not "/stockholm/".
 		// r.Route does NOT strip r.URL.Path, so we must use http.StripPrefix explicitly.
 		stripped := http.StripPrefix(h.cfg.BasePath, http.HandlerFunc(h.handleStatic))
+
+		// Redirect bare /stockholm to /stockholm/ so the browser sets the correct
+		// base URL for relative asset references. The router's CleanPath
+		// middleware routes /stockholm/ here too (path.Clean drops the trailing
+		// slash from the *routing* path), so check the real request path and
+		// serve directly when the slash is already present — otherwise this
+		// redirects to itself forever.
+		r.Get(h.cfg.BasePath, func(w http.ResponseWriter, r *http.Request) {
+			if strings.HasSuffix(r.URL.Path, "/") {
+				stripped.ServeHTTP(w, r)
+				return
+			}
+
+			http.Redirect(w, r, h.cfg.BasePath+"/", http.StatusMovedPermanently)
+		})
 		r.Get(h.cfg.BasePath+"/", stripped.ServeHTTP)
 		r.Head(h.cfg.BasePath+"/", stripped.ServeHTTP)
 		r.Get(h.cfg.BasePath+"/*", stripped.ServeHTTP)
