@@ -2564,23 +2564,36 @@ func AddSource(ds *datastore.DataStore, account, username, providerID, secret, s
 		_, err := ds.MutateConfiguredSources(account, devID, func(sources []models.ConfiguredSource) ([]models.ConfiguredSource, error) {
 			// Update or append. Most providers are singletons (one account
 			// each), so the same provider replaces the existing entry.
-			// STORED_MUSIC is the exception: each DLNA media server is a
-			// separate account (username = "<UDN>/0"), so it must only
-			// replace when the account also matches. Otherwise registering
-			// a second media server overwrites the first, which then
-			// vanishes from /full + /sources and the speaker drops it
-			// (only one media server could ever stay registered).
+			// STORED_MUSIC and SPOTIFY are the exceptions: each DLNA media
+			// server is a separate account (username = "<UDN>/0"), and a
+			// household can link several Spotify accounts (Bose's own
+			// Marge kept one <source> per Spotify user), so those must
+			// only replace when the account also matches. Otherwise
+			// registering a second account overwrites the first, which
+			// then vanishes from /full + /sources and the speaker drops
+			// it — for Spotify that orphans every preset bound to the
+			// evicted account, and because the bridge/watchdog re-add
+			// each linked account in turn, which one survives flips
+			// between runs.
+			perAccount := providerID == strconv.Itoa(constants.StoredMusicProviderID) ||
+				providerID == strconv.Itoa(constants.SpotifyProviderID)
+
 			for i := range sources {
 				sameProvider := sources[i].SourceProviderID == providerID
-				if providerID == strconv.Itoa(constants.StoredMusicProviderID) {
+				// Legacy Spotify entries may carry the type without the
+				// provider id; treat them as the same provider.
+				if providerID == strconv.Itoa(constants.SpotifyProviderID) && sources[i].SourceKey.Type == constants.ProviderSpotify {
+					sameProvider = true
+				}
+
+				if perAccount {
 					// Match on the persisted account identity
 					// (SourceKey.Account), not Username, which does not
 					// round-trip through the datastore.
 					sameProvider = sameProvider && sources[i].SourceKey.Account == username
 				}
 
-				if sameProvider ||
-					(providerID == strconv.Itoa(constants.SpotifyProviderID) && sources[i].SourceKey.Type == constants.ProviderSpotify) {
+				if sameProvider {
 					sources[i] = newSrc
 
 					return sources, nil
