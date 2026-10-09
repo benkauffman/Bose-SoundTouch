@@ -1367,6 +1367,8 @@ func getAccountDevicesWithPresetReader(ds *datastore.DataStore, account string, 
 		devices = append(devices, dev)
 	}
 
+	sortAccountDevices(devices)
+
 	return devices, lastDeviceID
 }
 

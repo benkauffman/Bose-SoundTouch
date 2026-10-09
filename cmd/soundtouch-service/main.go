@@ -30,6 +30,7 @@ import (
 	"github.com/gesellix/bose-soundtouch/pkg/service/datastore"
 	"github.com/gesellix/bose-soundtouch/pkg/service/handlers"
 	"github.com/gesellix/bose-soundtouch/pkg/service/logbuf"
+	"github.com/gesellix/bose-soundtouch/pkg/service/marge"
 	"github.com/gesellix/bose-soundtouch/pkg/service/proxy"
 	"github.com/gesellix/bose-soundtouch/pkg/service/setup"
 	"github.com/gesellix/bose-soundtouch/pkg/service/soundtouchweb"
@@ -484,6 +485,11 @@ var serviceFlags = []cli.Flag{
 		EnvVars: []string{"STOCKHOLM_DIR"},
 	},
 	&cli.StringFlag{
+		Name:    "device-order",
+		Usage:   "Comma-separated speaker names or deviceIDs pinned to the top of the account device list (the order the SoundTouch app shows); unlisted speakers follow in deviceID order",
+		EnvVars: []string{"DEVICE_ORDER"},
+	},
+	&cli.StringFlag{
 		Name:    "stockholm-base-path",
 		Usage:   "URL prefix under which the Stockholm UI is served (e.g. /stockholm). Empty serves at root.",
 		Value:   "/stockholm",
@@ -929,6 +935,11 @@ func loadConfig(c *cli.Context) (serviceConfig, error) {
 	internalPaths := c.StringSlice("internal-paths")
 	migrationEnabled := c.Bool("migration-enabled")
 	migrationDryRun := c.Bool("migration-dry-run")
+	marge.SetDeviceOrder(c.String("device-order"))
+	if order := c.String("device-order"); order != "" {
+		log.Printf("Device order pinned: %s", order)
+	}
+
 	stockholmDir := c.String("stockholm-dir")
 	stockholmBasePath := c.String("stockholm-base-path")
 
