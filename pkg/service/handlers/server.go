@@ -1438,6 +1438,14 @@ func (s *Server) findExistingDeviceInfoByDeviceID(deviceID string) *models.Servi
 
 // PrimeDeviceWithSpotify triggers a Spotify priming of the speaker if a Spotify account is linked.
 func (s *Server) PrimeDeviceWithSpotify(deviceIP string) {
+	s.PrimeDeviceWithSpotifyAccount(deviceIP, "")
+}
+
+// PrimeDeviceWithSpotifyAccount logs the speaker at deviceIP into the linked
+// Spotify account named by selector (user ID or email; empty = the configured
+// primary). A SoundTouch speaker holds one active Spotify user, so this is how
+// that user is chosen or switched.
+func (s *Server) PrimeDeviceWithSpotifyAccount(deviceIP, selector string) {
 	s.mu.RLock()
 	svc := s.spotifyService
 	s.mu.RUnlock()
@@ -1451,9 +1459,7 @@ func (s *Server) PrimeDeviceWithSpotify(deviceIP string) {
 		return
 	}
 
-	// We'll use the first linked account. In the future, we might want to let the user
-	// pick or map accounts to speakers, but for now, we follow the "One linked account" model.
-	accessToken, username, err := svc.GetFreshToken()
+	accessToken, username, err := svc.GetFreshTokenFor(selector)
 	if err != nil {
 		log.Printf("[Spotify Watchdog] Failed to get fresh token for %s: %v", sanitizeLog(deviceIP), err)
 		return

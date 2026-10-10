@@ -3,6 +3,7 @@
 package spotify
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -13,6 +14,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -48,6 +50,7 @@ type Service struct {
 	dataDir      string
 	mu           sync.RWMutex
 	accounts     map[string]*Account
+	primary      string // user ID or email of the account used when no selector is given
 
 	// Overridable URLs for testing
 	tokenURL string
@@ -287,23 +290,81 @@ func (s *Service) RefreshAccessToken(account *Account) error {
 	return nil
 }
 
-// GetFreshToken returns a valid access token and username, refreshing if needed.
-func (s *Service) GetFreshToken() (accessToken, username string, err error) {
+// SetPrimaryAccount pins which linked account GetFreshToken uses when the
+// caller does not name one. Accepts a Spotify user ID or the account email,
+// case-insensitive. Empty keeps the default (lowest user ID).
+func (s *Service) SetPrimaryAccount(idOrEmail string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.primary = strings.ToLower(strings.TrimSpace(idOrEmail))
+}
+
+// PrimaryAccount reports the configured primary selector (may be empty).
+func (s *Service) PrimaryAccount() string {
 	s.mu.RLock()
+	defer s.mu.RUnlock()
 
+	return s.primary
+}
+
+// selectAccount picks the account for selector (user ID or email,
+// case-insensitive). Empty selector means the configured primary, and when no
+// primary is set or it is not linked, the lowest user ID. Never Go map order:
+// that made a speaker's active Spotify user depend on iteration luck and left
+// the other account's token unrefreshed, so its presets failed with
+// INVALID_SOURCE once the token aged out.
+// Caller must hold at least s.mu.RLock.
+func (s *Service) selectAccount(selector string) (*Account, error) {
 	if len(s.accounts) == 0 {
-		s.mu.RUnlock()
-		return "", "", fmt.Errorf("no Spotify accounts linked")
+		return nil, fmt.Errorf("no Spotify accounts linked")
 	}
 
-	// Get the first account
-	var account *Account
-	for _, a := range s.accounts {
-		account = a
-		break
+	want := strings.ToLower(strings.TrimSpace(selector))
+	explicit := want != ""
+
+	if want == "" {
+		want = s.primary
 	}
 
+	if want != "" {
+		for _, a := range s.accounts {
+			if strings.ToLower(a.UserID) == want || strings.ToLower(a.Email) == want {
+				return a, nil
+			}
+		}
+
+		if explicit {
+			return nil, fmt.Errorf("spotify account %q is not linked", selector)
+		}
+	}
+
+	ids := make([]string, 0, len(s.accounts))
+	for id := range s.accounts {
+		ids = append(ids, id)
+	}
+
+	sort.Strings(ids)
+
+	return s.accounts[ids[0]], nil
+}
+
+// GetFreshToken returns a valid access token and username for the primary
+// account (see SetPrimaryAccount), refreshing if needed.
+func (s *Service) GetFreshToken() (accessToken, username string, err error) {
+	return s.GetFreshTokenFor("")
+}
+
+// GetFreshTokenFor returns a valid access token and username for the account
+// named by selector (user ID or email). Empty selector = primary account.
+func (s *Service) GetFreshTokenFor(selector string) (accessToken, username string, err error) {
+	s.mu.RLock()
+	account, err := s.selectAccount(selector)
 	s.mu.RUnlock()
+
+	if err != nil {
+		return "", "", err
+	}
 
 	// Check if token needs refresh (expired or within 60s of expiry)
 	if account.ExpiresAt < time.Now().Unix()+60 {
@@ -316,6 +377,60 @@ func (s *Service) GetFreshToken() (accessToken, username string, err error) {
 	defer s.mu.RUnlock()
 
 	return account.AccessToken, account.UserID, nil
+}
+
+// RefreshAll refreshes every linked account whose token expires within
+// margin. Accounts that fail are logged and skipped; the first error is
+// returned after all accounts were attempted.
+func (s *Service) RefreshAll(margin time.Duration) error {
+	s.mu.RLock()
+	due := make([]*Account, 0, len(s.accounts))
+
+	for _, a := range s.accounts {
+		if a.ExpiresAt < time.Now().Add(margin).Unix() {
+			due = append(due, a)
+		}
+	}
+	s.mu.RUnlock()
+
+	var firstErr error
+
+	for _, a := range due {
+		if err := s.RefreshAccessToken(a); err != nil {
+			log.Printf("[Spotify] token refresh failed for %s: %v", a.UserID, err)
+
+			if firstErr == nil {
+				firstErr = err
+			}
+
+			continue
+		}
+
+		log.Printf("[Spotify] token refreshed for %s", a.UserID)
+	}
+
+	return firstErr
+}
+
+// StartTokenRefresher keeps every linked account's token fresh in the
+// background until ctx is cancelled. Before this, only the account a speaker
+// happened to be primed with was ever refreshed.
+func (s *Service) StartTokenRefresher(ctx context.Context, interval, margin time.Duration) {
+	go func() {
+		_ = s.RefreshAll(margin)
+
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				_ = s.RefreshAll(margin)
+			}
+		}
+	}()
 }
 
 // GetAccounts returns a copy of all accounts with tokens stripped for API responses.

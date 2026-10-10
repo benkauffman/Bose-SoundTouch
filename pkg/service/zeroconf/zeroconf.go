@@ -272,6 +272,37 @@ func withAction(base *url.URL, action string) string {
 	return u.String()
 }
 
+// infoTokenType returns the tokenType the speaker advertises in getInfo
+// ("accesstoken" on SoundTouch), or "" when unavailable.
+func infoTokenType(host, port string) string {
+	ip, err := validateZcHost(host)
+	if err != nil {
+		return ""
+	}
+
+	base, err := buildZcBase(ip, port)
+	if err != nil {
+		return ""
+	}
+
+	resp, err := http.Get(withAction(base, "getInfo"))
+	if err != nil {
+		return ""
+	}
+
+	defer func() { _ = resp.Body.Close() }()
+
+	var v struct {
+		TokenType string `json:"tokenType"`
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(&v); err != nil {
+		return ""
+	}
+
+	return v.TokenType
+}
+
 // GetInfo fetches the speaker's DH public key via GET ?action=getInfo.
 // host must be a literal private-network IP address.
 // port is the ZeroConf port (typically "8200"); pass "" to omit it from the URL.
@@ -342,6 +373,14 @@ func PushCredentials(host, port, username, accessToken string) error {
 		return pushSimplifiedToken(host, port, username, accessToken)
 	}
 
+	// SoundTouch firmware advertises tokenType=accesstoken in getInfo and only
+	// logs in via the plain accesstoken form (verified 2026-10-10, FW 27.0.6,
+	// libspotify 3.88.29): the DH-encrypted blob is answered with HTTP 200 but
+	// status 402 and no login. Prefer the simplified form when advertised.
+	if infoTokenType(host, port) == "accesstoken" {
+		return pushSimplifiedToken(host, port, username, accessToken)
+	}
+
 	privateKey, ourPublicKeyBytes, err := GenerateDHKeyPair()
 	if err != nil {
 		return fmt.Errorf("pushCredentials: keygen: %w", err)
@@ -364,15 +403,21 @@ func PushCredentials(host, port, username, accessToken string) error {
 
 	client := &http.Client{Timeout: 10 * time.Second}
 
-	resp, err := client.PostForm(withAction(base, "addUser"), data)
+	// action MUST be a form field: the eSDK answers ?action=addUser in the
+	// query string with 404 + empty body and leaves activeUser untouched
+	// (verified on SoundTouch 10 FW 27.0.6, libspotify 3.88.29).
+	data.Set("action", "addUser")
+
+	resp, err := client.PostForm(base.String(), data)
 	if err != nil {
 		return fmt.Errorf("pushCredentials: addUser: %w", err)
 	}
 
 	defer func() { _ = resp.Body.Close() }()
 
+	body, _ := io.ReadAll(resp.Body)
+
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
 		if isAddUserNoOp(resp.StatusCode, body) {
 			logAddUserNoOp("DH", base, username, resp)
 
@@ -384,11 +429,40 @@ func PushCredentials(host, port, username, accessToken string) error {
 		return fmt.Errorf("pushCredentials: addUser status %d: %s", resp.StatusCode, body)
 	}
 
+	if err := zcVerdict(body); err != nil {
+		return err
+	}
+
 	return nil
 }
 
-// isAddUserNoOp recognises the narrow firmware pattern (status 404, empty body)
-// that signals "no transition required". Anything else — including 404 with a
+// zcVerdict reads the speaker's JSON reply to addUser. The eSDK answers HTTP
+// 200 for both success ({"status":101,"statusString":"OK"}) and rejection
+// (e.g. {"status":402,"statusString":"ERROR-SPOTIFY-ERROR","spotifyError":8}),
+// so the HTTP status alone says nothing. Returns nil only for status 101.
+func zcVerdict(body []byte) error {
+	var v struct {
+		Status       int    `json:"status"`
+		StatusString string `json:"statusString"`
+		SpotifyError int    `json:"spotifyError"`
+	}
+
+	if err := json.Unmarshal(bytes.TrimSpace(body), &v); err != nil {
+		return fmt.Errorf("addUser: unparseable reply %q", strings.TrimSpace(string(body)))
+	}
+
+	if v.Status != 101 {
+		return fmt.Errorf("addUser: speaker rejected login: status=%d %s spotifyError=%d", v.Status, v.StatusString, v.SpotifyError)
+	}
+
+	return nil
+}
+
+// isAddUserNoOp recognises the narrow firmware pattern (status 404, empty body).
+// Historically read as "no transition required"; on real hardware it turned out
+// to be the eSDK rejecting action=addUser in the query string (see the body-form
+// note above), which the fix above avoids. Kept so an unexpected 404 is still
+// reported distinctly. Anything else — including 404 with a
 // body, or any other non-2xx — falls through to the real failure path so we
 // don't silently swallow genuine errors.
 func isAddUserNoOp(status int, body []byte) bool {
@@ -444,15 +518,21 @@ func pushSimplifiedToken(host, port, username, accessToken string) error {
 
 	client := &http.Client{Timeout: 10 * time.Second}
 
-	resp, err := client.PostForm(withAction(base, "addUser"), data)
+	// action MUST be a form field: the eSDK answers ?action=addUser in the
+	// query string with 404 + empty body and leaves activeUser untouched
+	// (verified on SoundTouch 10 FW 27.0.6, libspotify 3.88.29).
+	data.Set("action", "addUser")
+
+	resp, err := client.PostForm(base.String(), data)
 	if err != nil {
 		return fmt.Errorf("pushSimplifiedToken: %w", err)
 	}
 
 	defer func() { _ = resp.Body.Close() }()
 
+	body, _ := io.ReadAll(resp.Body)
+
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
 		if isAddUserNoOp(resp.StatusCode, body) {
 			logAddUserNoOp("simplified", base, username, resp)
 
@@ -462,6 +542,10 @@ func pushSimplifiedToken(host, port, username, accessToken string) error {
 		logAddUserFailure("simplified", base, username, resp, body)
 
 		return fmt.Errorf("pushSimplifiedToken: status %d: %s", resp.StatusCode, body)
+	}
+
+	if err := zcVerdict(body); err != nil {
+		return err
 	}
 
 	return nil

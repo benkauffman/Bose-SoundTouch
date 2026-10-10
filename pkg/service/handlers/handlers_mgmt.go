@@ -480,11 +480,21 @@ func (s *Server) HandleMgmtPrimeDevice(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Optional: which linked account becomes the speaker's active Spotify user
+	// (user ID or email). Empty = the configured primary account.
+	account := r.URL.Query().Get("account")
+
 	// Trigger priming
-	go s.PrimeDeviceWithSpotify(deviceIP)
+	go s.PrimeDeviceWithSpotifyAccount(deviceIP, account)
 
 	w.Header().Set("Content-Type", "application/json")
-	_, _ = w.Write([]byte(`{"status":"Priming triggered"}`))
+
+	if err := json.NewEncoder(w).Encode(map[string]string{
+		"status":  "Priming triggered",
+		"account": account,
+	}); err != nil {
+		log.Printf("[Mgmt] Failed to encode prime response: %v", err)
+	}
 }
 
 // HandleMgmtAmazonInit starts the Amazon OAuth flow by returning an authorization URL.

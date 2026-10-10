@@ -11,6 +11,18 @@ import (
 	"github.com/gesellix/bose-soundtouch/pkg/service/zeroconf"
 )
 
+// zcTestAction returns the ZeroConf action whether it was sent in the query
+// string (getInfo) or in the form body (addUser, as real firmware requires).
+func zcTestAction(r *http.Request) string {
+	if a := r.URL.Query().Get("action"); a != "" {
+		return a
+	}
+
+	_ = r.ParseForm()
+
+	return r.FormValue("action")
+}
+
 func TestPushAmazonCredentials_FullRoundTrip(t *testing.T) {
 	speakerPrivate, speakerPublicBytes, err := zeroconf.GenerateDHKeyPair()
 	if err != nil {
@@ -25,7 +37,7 @@ func TestPushAmazonCredentials_FullRoundTrip(t *testing.T) {
 	var got received
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Query().Get("action") {
+		switch zcTestAction(r) {
 		case "getInfo":
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(map[string]interface{}{
@@ -90,7 +102,9 @@ func TestPushAmazonCredentials_FullRoundTrip(t *testing.T) {
 					return
 				}
 			}
+			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"status":101,"statusString":"OK"}`))
 
 		default:
 			http.NotFound(w, r)
@@ -121,7 +135,7 @@ func TestPushAmazonCredentials_FallbackOnGetInfoFailure(t *testing.T) {
 	var receivedForm map[string]string
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Query().Get("action") {
+		switch zcTestAction(r) {
 		case "getInfo":
 			http.Error(w, "not supported", http.StatusNotFound)
 		case "addUser":
@@ -135,7 +149,9 @@ func TestPushAmazonCredentials_FallbackOnGetInfoFailure(t *testing.T) {
 				"clientKey": r.FormValue("clientKey"),
 				"tokenType": r.FormValue("tokenType"),
 			}
+			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"status":101,"statusString":"OK"}`))
 		default:
 			http.NotFound(w, r)
 		}

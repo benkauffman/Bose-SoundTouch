@@ -152,6 +152,15 @@ func initMusicServices(config serviceConfig, server *handlers.Server) {
 			log.Printf("[Spotify] Failed to load accounts: %v", err)
 		}
 
+		if config.spotifyPrimaryAccount != "" {
+			spotifyService.SetPrimaryAccount(config.spotifyPrimaryAccount)
+			log.Printf("[Spotify] primary account: %s", sanitizeLog(config.spotifyPrimaryAccount))
+		}
+
+		// Keep every linked account's token fresh, not just the one a speaker
+		// was last primed with (10 min cadence, refresh when < 15 min left).
+		spotifyService.StartTokenRefresher(context.Background(), 10*time.Minute, 15*time.Minute)
+
 		server.SetSpotifyService(spotifyService)
 
 		clientIDPrefix := config.spotifyClientID
@@ -364,6 +373,11 @@ var serviceFlags = []cli.Flag{
 		Name:    "spotify-token-url",
 		Usage:   "Spotify OAuth token URL (for testing)",
 		EnvVars: []string{"SPOTIFY_TOKEN_URL"},
+	},
+	&cli.StringFlag{
+		Name:    "spotify-primary-account",
+		Usage:   "Linked Spotify account (user ID or email) that speakers are primed with and that presets/search use by default; others stay linked and refreshed",
+		EnvVars: []string{"SPOTIFY_PRIMARY_ACCOUNT"},
 	},
 	&cli.StringFlag{
 		Name:    "spotify-api-base",
@@ -767,6 +781,7 @@ type serviceConfig struct {
 	spotifyRedirectURI      string
 	spotifyTokenURL         string
 	spotifyAPIBase          string
+	spotifyPrimaryAccount   string
 	amazonClientID          string
 	amazonClientSecret      string
 	amazonRedirectURI       string
@@ -916,6 +931,7 @@ func loadConfig(c *cli.Context) (serviceConfig, error) {
 	spotifyRedirectURI := c.String("spotify-redirect-uri")
 	spotifyTokenURL := c.String("spotify-token-url")
 	spotifyAPIBase := c.String("spotify-api-base")
+	spotifyPrimaryAccount := c.String("spotify-primary-account")
 	amazonClientID := c.String("amazon-client-id")
 	amazonClientSecret := c.String("amazon-client-secret")
 	amazonRedirectURI := c.String("amazon-redirect-uri")
@@ -975,6 +991,7 @@ func loadConfig(c *cli.Context) (serviceConfig, error) {
 		spotifyRedirectURI:      spotifyRedirectURI,
 		spotifyTokenURL:         spotifyTokenURL,
 		spotifyAPIBase:          spotifyAPIBase,
+		spotifyPrimaryAccount:   spotifyPrimaryAccount,
 		amazonClientID:          amazonClientID,
 		amazonClientSecret:      amazonClientSecret,
 		amazonRedirectURI:       amazonRedirectURI,

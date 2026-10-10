@@ -12,6 +12,18 @@ import (
 	"github.com/gesellix/bose-soundtouch/pkg/service/zeroconf"
 )
 
+// zcTestAction returns the ZeroConf action whether it was sent in the query
+// string (getInfo) or in the form body (addUser, as real firmware requires).
+func zcTestAction(r *http.Request) string {
+	if a := r.URL.Query().Get("action"); a != "" {
+		return a
+	}
+
+	_ = r.ParseForm()
+
+	return r.FormValue("action")
+}
+
 // TestPushSpotifyCredentials_FullRoundTrip starts a mock "speaker" ZeroConf server,
 // has it generate its own DH key pair, and verifies that the client correctly
 // encrypts and delivers the Spotify credentials.
@@ -29,7 +41,7 @@ func TestPushSpotifyCredentials_FullRoundTrip(t *testing.T) {
 	var got received
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Query().Get("action") {
+		switch zcTestAction(r) {
 		case "getInfo":
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(map[string]interface{}{
@@ -73,7 +85,9 @@ func TestPushSpotifyCredentials_FullRoundTrip(t *testing.T) {
 			got.username = creds.username
 			got.authData = string(creds.authData)
 			got.authType = creds.authType
+			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"status":101,"statusString":"OK"}`))
 
 		default:
 			http.NotFound(w, r)
@@ -107,7 +121,7 @@ func TestPushSpotifyCredentials_FallbackOnGetInfoFailure(t *testing.T) {
 	var receivedForm map[string]string
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Query().Get("action") {
+		switch zcTestAction(r) {
 		case "getInfo":
 			http.Error(w, "not supported", http.StatusNotFound)
 		case "addUser":
@@ -121,7 +135,9 @@ func TestPushSpotifyCredentials_FallbackOnGetInfoFailure(t *testing.T) {
 				"clientKey": r.FormValue("clientKey"),
 				"tokenType": r.FormValue("tokenType"),
 			}
+			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"status":101,"statusString":"OK"}`))
 		default:
 			http.NotFound(w, r)
 		}

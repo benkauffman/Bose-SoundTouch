@@ -8,8 +8,22 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"strings"
 	"testing"
 )
+
+// zcAction returns the ZeroConf action whether it was sent in the query string
+// (getInfo) or in the form body (addUser, as real firmware requires).
+func zcAction(r *http.Request) string {
+	if a := r.URL.Query().Get("action"); a != "" {
+		return a
+	}
+
+	_ = r.ParseForm()
+
+	return r.FormValue("action")
+}
 
 // srvHostPort returns the host and port of a test server's listener.
 func srvHostPort(srv *httptest.Server) (host, port string) {
@@ -151,7 +165,7 @@ func TestPushCredentials_FullRoundTrip(t *testing.T) {
 	var got received
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Query().Get("action") {
+		switch zcAction(r) {
 		case "getInfo":
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(map[string]interface{}{
@@ -195,7 +209,9 @@ func TestPushCredentials_FullRoundTrip(t *testing.T) {
 			got.username = creds.username
 			got.authData = string(creds.authData)
 			got.authType = creds.authType
+			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"status":101,"statusString":"OK"}`))
 
 		default:
 			http.NotFound(w, r)
@@ -226,7 +242,7 @@ func TestPushCredentials_FallbackOnGetInfoFailure(t *testing.T) {
 	var receivedForm map[string]string
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Query().Get("action") {
+		switch zcAction(r) {
 		case "getInfo":
 			http.Error(w, "not supported", http.StatusNotFound)
 		case "addUser":
@@ -240,7 +256,9 @@ func TestPushCredentials_FallbackOnGetInfoFailure(t *testing.T) {
 				"clientKey": r.FormValue("clientKey"),
 				"tokenType": r.FormValue("tokenType"),
 			}
+			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"status":101,"statusString":"OK"}`))
 		default:
 			http.NotFound(w, r)
 		}
@@ -459,7 +477,7 @@ func TestPushCredentials_AddUserNoOp(t *testing.T) {
 	}
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Query().Get("action") {
+		switch zcAction(r) {
 		case "getInfo":
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(map[string]interface{}{
@@ -487,7 +505,7 @@ func TestPushCredentials_AddUserNoOp(t *testing.T) {
 // 404s getInfo entirely).
 func TestPushCredentials_AddUserNoOpInSimplifiedPath(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Query().Get("action") {
+		switch zcAction(r) {
 		case "getInfo":
 			http.Error(w, "not supported", http.StatusNotFound)
 		case "addUser":
@@ -528,7 +546,7 @@ func TestPushCredentials_AddUserRealError_NotMisclassified(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				switch r.URL.Query().Get("action") {
+				switch zcAction(r) {
 				case "getInfo":
 					w.Header().Set("Content-Type", "application/json")
 					_ = json.NewEncoder(w).Encode(map[string]interface{}{
@@ -555,5 +573,63 @@ func TestPushCredentials_AddUserRealError_NotMisclassified(t *testing.T) {
 				t.Errorf("got ErrAddUserNoOp, want a real failure for status=%d body=%q", tc.status, tc.body)
 			}
 		})
+	}
+}
+
+// TestAddUserActionTravelsInFormBody pins the firmware contract: the speaker
+// only honours addUser when action is a form field. A server that only looks
+// at the query string must see no addUser at all.
+func TestAddUserActionTravelsInFormBody(t *testing.T) {
+	var sawQueryAction, sawFormAction string
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"status":101,"statusString":"OK"}`))
+			return
+		}
+
+		sawQueryAction = r.URL.Query().Get("action")
+		_ = r.ParseForm()
+		sawFormAction = r.FormValue("action")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"status":101,"statusString":"OK","spotifyError":0}`))
+	}))
+	defer srv.Close()
+
+	u, _ := url.Parse(srv.URL)
+	host, port := u.Hostname(), u.Port()
+
+	if err := pushSimplifiedToken(host, port, "user", "token"); err != nil {
+		t.Fatalf("pushSimplifiedToken: %v", err)
+	}
+
+	if sawFormAction != "addUser" {
+		t.Fatalf("form action = %q, want addUser", sawFormAction)
+	}
+
+	if sawQueryAction != "" {
+		t.Fatalf("query action = %q, want empty", sawQueryAction)
+	}
+}
+
+// TestAddUserRejectsStatus402 pins the firmware contract that HTTP 200 is not
+// a login: the JSON status must be 101.
+func TestAddUserRejectsStatus402(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method == http.MethodGet {
+			_, _ = w.Write([]byte(`{"status":101,"statusString":"OK","tokenType":"accesstoken"}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"status":402,"statusString":"ERROR-SPOTIFY-ERROR","spotifyError":8}`))
+	}))
+	defer srv.Close()
+
+	u, _ := url.Parse(srv.URL)
+
+	err := pushSimplifiedToken(u.Hostname(), u.Port(), "user", "token")
+	if err == nil || !strings.Contains(err.Error(), "status=402") {
+		t.Fatalf("want a status=402 rejection, got %v", err)
 	}
 }
