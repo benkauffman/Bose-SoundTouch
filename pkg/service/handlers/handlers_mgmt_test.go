@@ -4,8 +4,11 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gesellix/bose-soundtouch/pkg/service/datastore"
 	"github.com/gesellix/bose-soundtouch/pkg/service/spotify"
@@ -372,6 +375,104 @@ func TestBasicAuthAdmin(t *testing.T) {
 
 		if rrGated.Code != http.StatusUnauthorized {
 			t.Errorf("expected the SAME handler to enforce auth immediately after toggling, got %d", rrGated.Code)
+		}
+	})
+}
+
+func TestHandleMgmtSpotifyToken(t *testing.T) {
+	s := NewServer(nil, nil, "http://localhost", false, false, false)
+
+	t.Run("no spotify service configured", func(t *testing.T) {
+		w := httptest.NewRecorder()
+		s.HandleMgmtSpotifyToken(w, httptest.NewRequest("GET", "/mgmt/spotify/token", nil))
+
+		if w.Code != http.StatusServiceUnavailable {
+			t.Errorf("expected 503, got %d", w.Code)
+		}
+	})
+
+	dir := t.TempDir()
+	future := time.Now().Add(time.Hour).Unix()
+	accounts := map[string]map[string]interface{}{
+		"house-id": {"user_id": "house-id", "email": "home@example.com", "access_token": "tok-house", "refresh_token": "r", "expires_at": future,
+			"scope": "streaming user-library-read"},
+		"ben-id": {"user_id": "ben-id", "email": "ben@example.com", "access_token": "tok-ben", "refresh_token": "r", "expires_at": future},
+	}
+
+	data, err := json.Marshal(accounts)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.MkdirAll(filepath.Join(dir, "spotify"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.WriteFile(filepath.Join(dir, "spotify", "accounts.json"), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	svc := spotify.NewSpotifyService("cid", "secret", "http://localhost/cb", dir)
+	if err := svc.Load(); err != nil {
+		t.Fatal(err)
+	}
+
+	svc.SetPrimaryAccount("home@example.com")
+	s.SetSpotifyService(svc)
+
+	get := func(t *testing.T, query string) (int, map[string]string) {
+		t.Helper()
+
+		w := httptest.NewRecorder()
+		s.HandleMgmtSpotifyToken(w, httptest.NewRequest("GET", "/mgmt/spotify/token"+query, nil))
+
+		var resp map[string]string
+		if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+			t.Fatalf("decode %q response: %v", query, err)
+		}
+
+		if ct := w.Header().Get("Content-Type"); ct != "application/json" {
+			t.Errorf("Content-Type = %q, want application/json", ct)
+		}
+
+		return w.Code, resp
+	}
+
+	cases := []struct {
+		name, query, wantUser, wantToken, wantScopes string
+	}{
+		{"default is the primary", "", "house-id", "tok-house", "streaming user-library-read"},
+		{"by user id", "?account=ben-id", "ben-id", "tok-ben", ""},
+		{"by email, case-insensitive", "?account=BEN@example.com", "ben-id", "tok-ben", ""},
+		{"primary by email", "?account=home@example.com", "house-id", "tok-house", "streaming user-library-read"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			code, resp := get(t, tc.query)
+			if code != http.StatusOK || resp["username"] != tc.wantUser || resp["access_token"] != tc.wantToken {
+				t.Fatalf("got %d user=%q token=%q", code, resp["username"], resp["access_token"])
+			}
+
+			scopes, present := resp["scopes"]
+			if tc.wantScopes == "" && present {
+				t.Errorf("scopes should be omitted when unknown, got %q", scopes)
+			}
+
+			if tc.wantScopes != "" && scopes != tc.wantScopes {
+				t.Errorf("scopes = %q, want %q", scopes, tc.wantScopes)
+			}
+		})
+	}
+
+	t.Run("unknown account is a 404 without any token", func(t *testing.T) {
+		code, resp := get(t, "?account=ghost@example.com")
+		if code != http.StatusNotFound {
+			t.Fatalf("expected 404, got %d", code)
+		}
+
+		if resp["error"] == "" || resp["access_token"] != "" || resp["username"] != "" {
+			t.Fatalf("unexpected 404 body: %v", resp)
 		}
 	})
 }

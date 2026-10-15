@@ -16,6 +16,7 @@ import (
 	"github.com/gesellix/bose-soundtouch/pkg/models"
 	"github.com/gesellix/bose-soundtouch/pkg/service/constants"
 	"github.com/gesellix/bose-soundtouch/pkg/service/marge"
+	"github.com/gesellix/bose-soundtouch/pkg/service/spotify"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 )
@@ -391,8 +392,13 @@ func (s *Server) HandleMgmtSpotifyAccounts(w http.ResponseWriter, _ *http.Reques
 	}
 }
 
-// HandleMgmtSpotifyToken returns a fresh Spotify access token for the linked account.
-func (s *Server) HandleMgmtSpotifyToken(w http.ResponseWriter, _ *http.Request) {
+// HandleMgmtSpotifyToken returns a fresh Spotify access token for a linked
+// account. The optional ?account= query parameter (Spotify user ID or email,
+// case-insensitive) picks the account; empty means the primary account. An
+// account that is not linked is a 404 and never another account's token. The
+// response carries "scopes" (space-separated, as granted) when known, so a
+// client can tell when an account needs re-linking for new scopes.
+func (s *Server) HandleMgmtSpotifyToken(w http.ResponseWriter, r *http.Request) {
 	s.mu.RLock()
 	svc := s.spotifyService
 	s.mu.RUnlock()
@@ -402,20 +408,36 @@ func (s *Server) HandleMgmtSpotifyToken(w http.ResponseWriter, _ *http.Request) 
 		return
 	}
 
-	accessToken, username, err := svc.GetFreshToken()
+	account := r.URL.Query().Get("account")
+
+	accessToken, username, scope, err := svc.GetFreshTokenWithScopeFor(account)
 	if err != nil {
+		if errors.Is(err, spotify.ErrAccountNotLinked) {
+			log.Printf("[Mgmt] Spotify token requested for unlinked account %s", sanitizeLog(account))
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusNotFound)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "spotify account not linked"})
+
+			return
+		}
+
 		log.Printf("[Mgmt] Spotify token error: %v", err)
 		http.Error(w, `{"error":"no token available"}`, http.StatusInternalServerError)
 
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-
-	if err := json.NewEncoder(w).Encode(map[string]string{
+	resp := map[string]string{
 		"access_token": accessToken,
 		"username":     username,
-	}); err != nil {
+	}
+	if scope != "" {
+		resp["scopes"] = scope
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+
+	if err := json.NewEncoder(w).Encode(resp); err != nil {
 		log.Printf("[Mgmt] Failed to encode token: %v", err)
 	}
 }

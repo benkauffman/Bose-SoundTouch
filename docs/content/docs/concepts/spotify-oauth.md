@@ -111,7 +111,7 @@ sequenceDiagram
 | GET    | `/mgmt/spotify/callback`                          | None  | Browser OAuth callback (redirect from Spotify, returns HTML)          |
 | POST   | `/mgmt/spotify/confirm`                           | Basic | Mobile app confirm (ueberboese deep link delivers code, returns JSON) |
 | GET    | `/mgmt/spotify/accounts`                          | Basic | List linked Spotify accounts (tokens stripped)                        |
-| GET    | `/mgmt/spotify/token`                             | Basic | Get fresh access token (auto-refreshes if expired)                    |
+| GET    | `/mgmt/spotify/token[?account=<userId\|email>]`   | Basic | Get fresh access token (auto-refreshes if expired); `account` picks a linked account (default primary, 404 if not linked); `scopes` lists the granted scopes when known |
 | POST   | `/mgmt/spotify/entity`                            | Basic | Resolve Spotify URI to name + image URL                               |
 | POST   | `/mgmt/spotify/prime`                             | Basic | Manually trigger server-side priming of a discovered speaker          |
 

@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -27,9 +28,18 @@ const (
 	SpotifyTokenURL = "https://accounts.spotify.com/api/token"
 	// SpotifyAPIBase is the base URL for the Spotify Web API.
 	SpotifyAPIBase = "https://api.spotify.com/v1"
-	// SpotifyScopes are the OAuth scopes required for speaker playback and user info.
-	SpotifyScopes = "streaming user-read-private user-read-email user-read-playback-state user-modify-playback-state"
+	// SpotifyScopes are the OAuth scopes requested when linking an account:
+	// speaker playback and user info, plus read access to the account's
+	// playlists, saved library, recently played and top items so a client can
+	// browse them. Accounts linked before a scope was added keep their old
+	// grant until they are re-linked.
+	SpotifyScopes = "streaming user-read-private user-read-email user-read-playback-state user-modify-playback-state" +
+		" playlist-read-private playlist-read-collaborative user-library-read user-read-recently-played user-top-read"
 )
+
+// ErrAccountNotLinked is returned when a caller names a Spotify account (by
+// user ID or email) that is not linked.
+var ErrAccountNotLinked = errors.New("spotify account not linked")
 
 // Account represents a stored Spotify account with tokens.
 type Account struct {
@@ -40,6 +50,10 @@ type Account struct {
 	RefreshToken string `json:"refresh_token"`
 	ExpiresAt    int64  `json:"expires_at"`
 	BoseSecret   string `json:"bose_secret,omitempty"`
+	// Scope is the space-separated scopes Spotify granted, as reported by the
+	// last token or refresh response. Empty means unknown (an account stored
+	// before this field existed whose token has not been refreshed since).
+	Scope string `json:"scope,omitempty"`
 }
 
 // Service manages Spotify OAuth flow and token lifecycle.
@@ -114,6 +128,7 @@ func (s *Service) ExchangeCodeAndStore(code string) error {
 
 	accessToken, _ := tokenResp["access_token"].(string)
 	refreshToken, _ := tokenResp["refresh_token"].(string)
+	scope, _ := tokenResp["scope"].(string)
 
 	expiresIn, _ := tokenResp["expires_in"].(float64)
 	if expiresIn == 0 {
@@ -141,6 +156,7 @@ func (s *Service) ExchangeCodeAndStore(code string) error {
 		RefreshToken: refreshToken,
 		ExpiresAt:    time.Now().Unix() + int64(expiresIn),
 		BoseSecret:   boseSecret,
+		Scope:        scope,
 	}
 
 	s.mu.Lock()
@@ -281,6 +297,10 @@ func (s *Service) RefreshAccessToken(account *Account) error {
 	if newRefresh, ok := result["refresh_token"].(string); ok && newRefresh != "" {
 		account.RefreshToken = newRefresh
 	}
+
+	if scope, ok := result["scope"].(string); ok && scope != "" {
+		account.Scope = scope
+	}
 	s.mu.Unlock()
 
 	if err := s.save(); err != nil {
@@ -316,12 +336,16 @@ func (s *Service) PrimaryAccount() string {
 // INVALID_SOURCE once the token aged out.
 // Caller must hold at least s.mu.RLock.
 func (s *Service) selectAccount(selector string) (*Account, error) {
-	if len(s.accounts) == 0 {
-		return nil, fmt.Errorf("no Spotify accounts linked")
-	}
-
 	want := strings.ToLower(strings.TrimSpace(selector))
 	explicit := want != ""
+
+	if len(s.accounts) == 0 {
+		if explicit {
+			return nil, fmt.Errorf("%w: %q", ErrAccountNotLinked, selector)
+		}
+
+		return nil, fmt.Errorf("no Spotify accounts linked")
+	}
 
 	if want == "" {
 		want = s.primary
@@ -335,7 +359,7 @@ func (s *Service) selectAccount(selector string) (*Account, error) {
 		}
 
 		if explicit {
-			return nil, fmt.Errorf("spotify account %q is not linked", selector)
+			return nil, fmt.Errorf("%w: %q", ErrAccountNotLinked, selector)
 		}
 	}
 
@@ -358,25 +382,35 @@ func (s *Service) GetFreshToken() (accessToken, username string, err error) {
 // GetFreshTokenFor returns a valid access token and username for the account
 // named by selector (user ID or email). Empty selector = primary account.
 func (s *Service) GetFreshTokenFor(selector string) (accessToken, username string, err error) {
+	accessToken, username, _, err = s.GetFreshTokenWithScopeFor(selector)
+
+	return accessToken, username, err
+}
+
+// GetFreshTokenWithScopeFor is GetFreshTokenFor plus the space-separated
+// scopes the account's token was granted (empty when unknown). An explicit
+// selector that matches no linked account returns ErrAccountNotLinked and
+// never falls back to another account.
+func (s *Service) GetFreshTokenWithScopeFor(selector string) (accessToken, username, scope string, err error) {
 	s.mu.RLock()
 	account, err := s.selectAccount(selector)
 	s.mu.RUnlock()
 
 	if err != nil {
-		return "", "", err
+		return "", "", "", err
 	}
 
 	// Check if token needs refresh (expired or within 60s of expiry)
 	if account.ExpiresAt < time.Now().Unix()+60 {
 		if err := s.RefreshAccessToken(account); err != nil {
-			return "", "", fmt.Errorf("refresh token: %w", err)
+			return "", "", "", fmt.Errorf("refresh token: %w", err)
 		}
 	}
 
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	return account.AccessToken, account.UserID, nil
+	return account.AccessToken, account.UserID, account.Scope, nil
 }
 
 // RefreshAll refreshes every linked account whose token expires within
@@ -446,6 +480,7 @@ func (s *Service) GetAccounts() []Account {
 			Email:       a.Email,
 			ExpiresAt:   a.ExpiresAt,
 			BoseSecret:  a.BoseSecret,
+			Scope:       a.Scope,
 			// AccessToken and RefreshToken deliberately omitted
 		})
 	}
